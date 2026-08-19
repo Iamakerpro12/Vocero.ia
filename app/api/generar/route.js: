@@ -1,0 +1,95 @@
+import { NextResponse } from "next/server";
+
+export async function POST(request) {
+  try {
+    const { texto, rating, negocio, rubro } = await request.json();
+
+    if (!texto || !rating || !negocio) {
+      return NextResponse.json(
+        { error: "Faltan datos requeridos (texto, rating, negocio)." },
+        { status: 400 }
+      );
+    }
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "El servidor no tiene configurada la clave de API." },
+        { status: 500 }
+      );
+    }
+
+    const systemPrompt = `Eres el motor de análisis de reputación de un producto SaaS para negocios pequeños (restaurantes, clínicas, tiendas) en español latinoamericano.
+
+Dado el texto de una reseña de cliente, el rating (1-5 estrellas), el nombre del negocio y su rubro, debes responder ÚNICAMENTE con un objeto JSON válido, sin texto adicional, sin markdown, sin backticks, con esta forma exacta:
+
+{
+  "respuesta": "una respuesta profesional, cálida y breve (3-5 líneas) lista para copiar y pegar en Google. Si la reseña es negativa, reconoce el problema específico, discúlpate de forma genuina sin ser servil, y ofrece una vía de solución concreta. Si es positiva, agradece de forma específica mencionando algo que el cliente mencionó, no genérico.",
+  "diagnostico": "una frase corta (máx 20 palabras) que identifique la causa raíz del problema o del elogio, en términos operativos del negocio, no solo repitiendo la queja.",
+  "acciones": ["acción concreta 1, máximo 10 palabras", "acción concreta 2, máximo 10 palabras", "acción concreta 3, máximo 10 palabras (opcional, solo si aplica)"],
+  "categoria": "una sola palabra que resuma el área afectada, elige entre: servicio, comida, limpieza, precio, ambiente, tiempos, elogio, otro"
+}
+
+Si el rating es 4 o 5, "acciones" puede tener solo 1-2 elementos orientados a mantener o reforzar lo bueno, no a corregir nada.`;
+
+    const userPrompt = `Negocio: ${negocio}
+Rubro: ${rubro || "no especificado"}
+Rating: ${rating} estrellas
+Reseña del cliente: "${texto}"`;
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userPrompt }],
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("Error de Anthropic:", errText);
+      return NextResponse.json(
+        { error: "Error al generar el análisis. Intenta de nuevo." },
+        { status: 502 }
+      );
+    }
+
+    const data = await response.json();
+    const textBlock = data?.content?.find((b) => b.type === "text");
+    if (!textBlock) {
+      return NextResponse.json(
+        { error: "El modelo no devolvió una respuesta válida." },
+        { status: 502 }
+      );
+    }
+
+    let clean = textBlock.text.trim();
+    clean = clean.replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "").trim();
+
+    let parsed;
+    try {
+      parsed = JSON.parse(clean);
+    } catch (e) {
+      console.error("No se pudo parsear JSON:", clean);
+      return NextResponse.json(
+        { error: "No se pudo interpretar la respuesta del modelo." },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json(parsed);
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json(
+      { error: "Error interno del servidor." },
+      { status: 500 }
+    );
+  }
+}
